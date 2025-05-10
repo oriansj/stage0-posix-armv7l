@@ -337,7 +337,7 @@ get_token_comment_line:
 
 	## Deal with // line comment
 	push {r14}
-	bl fgetc                            @ drop to match
+	bl purge_macro                      @ discard all until newline
 	pop {r14}
 	ldr r8, C_address
 	str r0, [r8]                        @ Set C
@@ -789,7 +789,7 @@ new_type:
 	bl match                            @ IF GLOBAL_TOKEN->S == "enum"
 	pop {r14}
 	cmp r0, #0                          @ If true
-	bne constant_value                  @ Looks like not an enum
+	bne program_else                    @ Looks like not an enum
 
 	## Deal with minimal anonymous enums
 	ldr r0, [r12]                       @ Using global_token
@@ -868,42 +868,6 @@ enum_end:
 	bl require_match                    @ Make sure it has the required
 	pop {r14}
 
-	b new_type                          @ go around again
-
-constant_value:
-	ldr r0, [r12]                       @ Using global_token
-	cmp r0, #0                          @ Check if NULL
-	beq program_done                    @ Be done if null
-
-	ldr r1, [r0, #8]                    @ GLOBAL_TOKEN->S
-	adr r0, constant                    @ "CONSTANT"
-	push {r14}
-	bl match                            @ IF GLOBAL_TOKEN->S == "CONSTANT"
-	pop {r14}
-	cmp r0, #0                          @ If true
-	bne program_else                    @ Looks like not a constant
-
-	## Deal with minimal constant case
-	ldr r0, [r12]                       @ Using global_token
-	ldr r0, [r0]                        @ global_token->next
-	str r0, [r12]                       @ global_token = global_token->next
-
-	ldr r0, [r0, #8]                    @ global_token->S
-	mov r1, #0                          @ NULL
-	ldr r8, global_constant_list_address
-	ldr r2, [r8]                        @ global_constant_list
-	push {r14}
-	bl sym_declare                      @ Declare that constant
-	pop {r14}
-	ldr r8, global_constant_list_address
-	str r0, [r8]                        @ global_constant_list = sym_declare(global_token->s, NULL, global_constant_list);
-
-	ldr r1, [r12]                       @ Using global_token
-	ldr r1, [r1]                        @ global_token->next
-	str r1, [r0, #16]                   @ global_constant_list->arguments = global_token->next
-
-	ldr r1, [r1]                        @ global_token->next->next
-	str r1, [r12]                       @ global_token = global_token->next->next;
 	b new_type                          @ go around again
 
 program_else:
@@ -1001,8 +965,6 @@ semicolon_0: .asciz ";"
 open_paren_0: .asciz "("
 .balign 4
 enum: .asciz "enum"
-.balign 4
-constant: .asciz "CONSTANT"
 .balign 4
 globals_list_address: .word globals_list
 global_constant_list_address: .word global_constant_list
@@ -5273,41 +5235,12 @@ create_struct_iter:
 	cmp r0, #125                        @ IF global_token->S[0] == "}"
 	beq create_struct_done              @ be done
 
-	## Looks like we are adding members
-	## Lets see if it is a union
-	ldr r0, [r12]                       @ Using global_token
-	ldr r0, [r0, #8]                    @ global_token->S
-	adr r1, union                       @ Using "union"
-	push {r14}
-	bl match                            @ IF match(global_token->s, "union")
-	pop {r14}
-	cmp r0, #0                          @ Deal with union
-	bne create_struct_single            @ Otherwise deal with singles
-
-	## Deal with union
-	mov r0, r4                          @ Put last in right place
-	mov r1, r2                          @ put offset in right place
-	push {r14}
-	bl build_union                      @ ASSEMBLE
-	pop {r14}
-	mov r4, r0                          @ last = build_union(last, offset)
-	add r2, r5                          @ offset = offset + member_size
-
-	adr r0, create_struct_string_1      @ Using "ERROR in create_struct\n Missing ;\n"
-	adr r1, semicolon_9                 @ Using ";"
-	push {r14}
-	bl require_match                    @ Make sure we have it
-	pop {r14}
-	b create_struct_iter                @ keep going
-
-create_struct_single:
-	## deal with singles
 	mov r0, r4                          @ Put last in right place
 	mov r1, r2                          @ put offset in right place
 	push {r14}
 	bl build_member                     @ ASSEMBLE
 	pop {r14}
-	mov r4, r0                          @ last = build_union(last, offset)
+	mov r4, r0                          @ last = build_member(last, offset)
 	add r2, r5                          @ offset = offset + member_size
 
 	adr r0, create_struct_string_1      @ Using "ERROR in create_struct\n Missing ;\n"
@@ -5345,8 +5278,6 @@ create_struct_string_0: .asciz "ERROR in create_struct\n Missing {\n"
 create_struct_string_1: .asciz "ERROR in create_struct\n Missing ;\n"
 .balign 4
 semicolon_9: .asciz ";"
-.balign 4
-union: .asciz "union"
 .balign 4
 open_curly_brace_1: .asciz "{"
 .balign 4
@@ -5512,83 +5443,6 @@ build_member_string_0: .asciz "Struct only supports [num] form\n"
 open_bracket_1: .asciz "["
 .balign 4
 close_bracket_2: .asciz "]"
-.balign 4
-
-
-## build_union function
-## Receives struct type* last in R0, int offset in R1 and global member_size in R5
-## Updates member_size in R5 and returns struct type* LAST in R0
-## Uses R2 for struct type* last, R3 for int offset, R4 for int size and R5 for int member_size
-build_union:
-	push {r1}                           @ Protect R1
-	push {r2}                           @ Protect R2
-	push {r3}                           @ Protect R3
-	push {r4}                           @ Protect R4
-	mov r2, r0                          @ Put LAST in right spot
-	mov r3, r1                          @ Put OFFSET in right spot
-	mov r4, #0                          @ SIZE = 0
-
-	ldr r0, [r12]                       @ Using global_token
-	ldr r0, [r0]                        @ global_token->NEXT
-	str r0, [r12]                       @ global_token = global_token->NEXT
-
-	adr r0, build_union_string_0        @ Using "ERROR in build_union\nMissing {\n"
-	adr r1, open_curly_brace_2          @ Using "{"
-	push {r14}
-	bl require_match                    @ Make sure we have it
-	pop {r14}
-
-build_union_iter:
-	ldr r0, [r12]                       @ Using global_token
-	ldr r0, [r0, #8]                    @ global_token->S
-	ldrb r0, [r0]                       @ global_token->S[0]
-	cmp r0, #125                        @ IF global_token->S[0] == "}"
-	beq build_union_done                @ Be done
-
-	## Collect union member
-	mov r0, r2                          @ Passing LAST
-	mov r1, r3                          @ Passing offset
-	push {r14}
-	bl build_member                     @ build_member(last, offset)
-	pop {r14}
-	mov r2, r0                          @ last = build_member(last, offset)
-
-	cmp r4, r5                          @ IF member_size > size
-	bgt build_union_size                @ Then update size
-
-	## deal with member_size > size
-	mov r4, r5                          @ SIZE = MEMBER_SIZE
-
-build_union_size:
-	adr r0, build_union_string_1        @ Using "ERROR in build_union\nMissing ;\n"
-	adr r1, semicolon_10                @ Using ";"
-	push {r14}
-	bl require_match                    @ Make sure we have it
-	pop {r14}
-	b build_union_iter                  @ Keep going
-
-build_union_done:
-	mov r5, r4                          @ MEMBER_SIZE = SIZE
-
-	ldr r0, [r12]                       @ Using global_token
-	ldr r0, [r0]                        @ global_token->NEXT
-	str r0, [r12]                       @ global_token = global_token->NEXT
-
-	mov r0, r2                          @ Return last
-
-	pop {r4}                            @ Restore R4
-	pop {r3}                            @ Restore R3
-	pop {r2}                            @ Restore R2
-	pop {r1}                            @ Restore R1
-	bx r14
-
-build_union_string_0: .asciz "ERROR in build_union\nMissing {\n"
-.balign 4
-build_union_string_1: .asciz "ERROR in build_union\nMissing ;\n"
-.balign 4
-semicolon_10: .asciz ";"
-.balign 4
-open_curly_brace_2: .asciz "{"
 .balign 4
 
 
